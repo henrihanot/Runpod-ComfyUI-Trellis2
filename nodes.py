@@ -4165,7 +4165,8 @@ class Trellis2CudaReset:
 
 
 class Trellis2PreloadModels:
-    """Preload all Trellis2 models in parallel. Used for startup warmup."""
+    """Preload shape models in parallel at startup. Texture models are loaded
+    later by Trellis2StartTexturePreload during mesh processing."""
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -4182,7 +4183,7 @@ class Trellis2PreloadModels:
     OUTPUT_NODE = True
 
     def process(self, pipeline, resolution):
-        pipeline.preload_all_models_parallel(resolution=resolution)
+        pipeline.preload_shape_models_parallel(resolution=resolution)
         return (pipeline,)
 
 

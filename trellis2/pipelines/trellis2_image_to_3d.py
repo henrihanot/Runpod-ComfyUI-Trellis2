@@ -336,11 +336,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['shape_slat_encoder'] = None
             self._cleanup_cuda()      
 
-    def preload_all_models_parallel(self, resolution=1024):
-        """Load all models in parallel threads (CPU first, then transfer to GPU).
+    def preload_shape_models_parallel(self, resolution=1024):
+        """Load shape-related models in parallel threads (CPU first, then GPU).
 
-        Safetensors loading is IO-bound, so Python threads work well despite the GIL.
-        Total time ≈ max(individual load times) instead of sum.
+        Only loads models needed for shape generation (image_cond, sparse, shape_flow,
+        shape_decoder). Texture models are loaded later by _start_texture_preload()
+        during mesh processing, overlapping IO with CPU-bound mesh ops.
         """
         import threading
         import time
@@ -365,17 +366,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             ("image_cond", self.load_image_cond_model),
             ("sparse_structure", self.load_sparse_structure_model),
             ("shape_slat_decoder", self.load_shape_slat_decoder),
-            ("shape_slat_encoder", self.load_shape_slat_encoder),
-            ("tex_slat_decoder", self.load_tex_slat_decoder),
         ]
         if resolution >= 1024:
             load_tasks.append(("shape_slat_flow_1024", self.load_shape_slat_flow_model_1024))
-            load_tasks.append(("tex_slat_flow_1024", self.load_tex_slat_flow_model_1024))
         else:
             load_tasks.append(("shape_slat_flow_512", self.load_shape_slat_flow_model_512))
-            load_tasks.append(("tex_slat_flow_512", self.load_tex_slat_flow_model_512))
 
-        print(f'[PRELOAD] Starting parallel load of {len(load_tasks)} models to CPU...')
+        print(f'[PRELOAD] Starting parallel load of {len(load_tasks)} shape models to CPU...')
         threads = []
         for name, load_fn in load_tasks:
             t = threading.Thread(target=_load_safe, args=(name, load_fn), daemon=True)
@@ -392,7 +389,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
         # Transfer all loaded models to GPU sequentially (fast, ~1-2s each)
         if target_device != 'cpu' and str(target_device) != 'cpu':
-            print(f'[PRELOAD] Transferring models to {target_device}...')
+            print(f'[PRELOAD] Transferring shape models to {target_device}...')
             for key, model in self.models.items():
                 if model is not None:
                     model.to(target_device)
@@ -402,7 +399,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.image_cond_model.to(target_device)
 
         elapsed = time.time() - t0
-        print(f'[PRELOAD] All models loaded in {elapsed:.1f}s')
+        print(f'[PRELOAD] Shape models loaded in {elapsed:.1f}s')
 
     def _start_texture_preload(self, resolution=1024):
         """Start background threads to preload texture models to CPU RAM.
