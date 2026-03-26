@@ -4190,6 +4190,7 @@ class Trellis2StartTexturePreload:
     """Start background preloading of texture models (non-blocking).
 
     Place this node after shape generation, before mesh processing.
+    The mesh input/output creates the ComfyUI dependency chain.
     The texture models will load in the background while mesh processing
     nodes execute. MeshTexturing will automatically wait for the preload
     to finish before starting.
@@ -4199,19 +4200,20 @@ class Trellis2StartTexturePreload:
         return {
             "required": {
                 "pipeline": ("TRELLIS2PIPELINE",),
+                "mesh": ("MESHWITHVOXEL",),
                 "resolution": ([512, 1024], {"default": 1024}),
             },
         }
 
-    RETURN_TYPES = ("TRELLIS2PIPELINE",)
-    RETURN_NAMES = ("pipeline",)
+    RETURN_TYPES = ("MESHWITHVOXEL", "TRELLIS2PIPELINE",)
+    RETURN_NAMES = ("mesh", "pipeline",)
     FUNCTION = "process"
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, resolution):
+    def process(self, pipeline, mesh, resolution):
         pipeline._start_texture_preload(resolution=resolution)
-        return (pipeline,)
+        return (mesh, pipeline,)
 
 
 NODE_CLASS_MAPPINGS = {
