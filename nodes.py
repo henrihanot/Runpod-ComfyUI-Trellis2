@@ -318,6 +318,12 @@ def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=Fal
         torch.cat(uvw_list) if return_uvw else None
     )    
 
+# --- Pipeline cache: persists between workflow executions ---
+_pipeline_cache = {
+    "pipeline": None,
+    "key": None,
+}
+
 class Trellis2LoadModel:
     @classmethod
     def INPUT_TYPES(s):
@@ -337,21 +343,33 @@ class Trellis2LoadModel:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Force ComfyUI to re-execute this node every time,
+        # but the internal cache returns the same pipeline object
+        return float("nan")
+
     def process(self, modelname, backend, device, low_vram, keep_models_loaded):
+        cache_key = (modelname, backend, device, low_vram, keep_models_loaded)
+
+        if _pipeline_cache["pipeline"] is not None and _pipeline_cache["key"] == cache_key:
+            print("[CACHE] Reusing cached pipeline")
+            return (_pipeline_cache["pipeline"],)
+
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
         #os.environ["FLEX_GEMM_AUTOTUNE_CACHE_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autotune_cache.json')
-        #os.environ["FLEX_GEMM_AUTOTUNER_VERBOSE"] = '1'        
+        #os.environ["FLEX_GEMM_AUTOTUNER_VERBOSE"] = '1'
         os.environ['ATTN_BACKEND'] = backend
-        
+
         config.set_backend(backend)
-        
+
         reset_cuda()
-        
-        torch.backends.cudnn.benchmark = False        
-            
+
+        torch.backends.cudnn.benchmark = False
+
         model_path = os.path.join(folder_paths.models_dir, modelname)
-        
+
         if not os.path.exists(model_path):
             print(f"Downloading model to: {model_path}")
             from huggingface_hub import snapshot_download
@@ -360,11 +378,11 @@ class Trellis2LoadModel:
                 local_dir=model_path,
                 local_dir_use_symlinks=False,
             )
-            
+
         dinov3_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m","model.safetensors")
         if not os.path.exists(dinov3_model_path):
             raise Exception("Facebook Dinov3 model not found in models/facebook/dinov3-vitl16-pretrain-lvd1689m folder")
-        
+
         trellis_image_large_path = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
         if not os.path.exists(trellis_image_large_path):
             print('Trellis-Image-Large ss_dec_conv3d_16l8_fp16 files not found. Trying to download the files from huggingface ...')
@@ -373,7 +391,7 @@ class Trellis2LoadModel:
             filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.json")
             path = Path(filename)
             path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             response = requests.get(url)
             if response.status_code == 200:
                 with open(filename, "wb") as f:
@@ -381,7 +399,7 @@ class Trellis2LoadModel:
                 print("Download ss_dec_conv3d_16l8_fp16.json complete!")
             else:
                 raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.json")
-            
+
             url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.safetensors?download=true"
             filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
 
@@ -392,15 +410,15 @@ class Trellis2LoadModel:
                 print("Download ss_dec_conv3d_16l8_fp16.safetensors complete!")
             else:
                 raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
-        
+
         if modelname == "visualbruno/TRELLIS.2-4B-FP8":
             use_fp8 = True
         else:
             use_fp8 = False
-                
+
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded, use_fp8=use_fp8)
         pipeline.low_vram = low_vram
-        
+
         if device=="cuda":
             if low_vram:
                 pipeline.cuda()
@@ -408,7 +426,10 @@ class Trellis2LoadModel:
                 pipeline.to(device)
         else:
             pipeline.to(device)
-        
+
+        _pipeline_cache["pipeline"] = pipeline
+        _pipeline_cache["key"] = cache_key
+
         return (pipeline,)
         
 class Trellis2MeshWithVoxelGenerator:
@@ -2127,13 +2148,16 @@ class Trellis2MeshTexturing:
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, sampler, inpainting):
+        # Wait for background texture preload if started by Trellis2StartTexturePreload
+        pipeline._wait_texture_preload()
+
         images = tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
 
         #image = tensor2pil(image)
-        
-        texture_guidance_interval = [texture_guidance_interval_start,texture_guidance_interval_end]                
-        
+
+        texture_guidance_interval = [texture_guidance_interval_start,texture_guidance_interval_end]
+
         tex_slat_sampler_params = {"steps":texture_steps,"guidance_strength":texture_guidance_strength,"guidance_rescale":texture_guidance_rescale,"guidance_interval":texture_guidance_interval,"rescale_t":texture_rescale_t}
 
         textured_mesh, baseColorTexture_np, metallicRoughnessTexture_np = pipeline.texture_mesh(mesh=trimesh, 
@@ -4137,8 +4161,59 @@ class Trellis2CudaReset:
 
     def process(self, input_1):
         reset_cuda()
-        return (input_1,)          
-        
+        return (input_1,)
+
+
+class Trellis2PreloadModels:
+    """Preload all Trellis2 models in parallel. Used for startup warmup."""
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("TRELLIS2PIPELINE",),
+                "resolution": ([512, 1024], {"default": 1024}),
+            },
+        }
+
+    RETURN_TYPES = ("TRELLIS2PIPELINE",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, pipeline, resolution):
+        pipeline.preload_all_models_parallel(resolution=resolution)
+        return (pipeline,)
+
+
+class Trellis2StartTexturePreload:
+    """Start background preloading of texture models (non-blocking).
+
+    Place this node after shape generation, before mesh processing.
+    The texture models will load in the background while mesh processing
+    nodes execute. MeshTexturing will automatically wait for the preload
+    to finish before starting.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("TRELLIS2PIPELINE",),
+                "resolution": ([512, 1024], {"default": 1024}),
+            },
+        }
+
+    RETURN_TYPES = ("TRELLIS2PIPELINE",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, pipeline, resolution):
+        pipeline._start_texture_preload(resolution=resolution)
+        return (pipeline,)
+
+
 NODE_CLASS_MAPPINGS = {
     "Trellis2LoadModel": Trellis2LoadModel,
     "Trellis2MeshWithVoxelGenerator": Trellis2MeshWithVoxelGenerator,
@@ -4190,8 +4265,10 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2Continue5": Trellis2Continue5,
     "Trellis2Continue6": Trellis2Continue6,
     "Trellis2CudaReset": Trellis2CudaReset,
+    "Trellis2PreloadModels": Trellis2PreloadModels,
+    "Trellis2StartTexturePreload": Trellis2StartTexturePreload,
     }
-    
+
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2LoadModel": "Trellis2 - LoadModel",
@@ -4244,4 +4321,37 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2Continue5": "Trellis2 - Continue 5",
     "Trellis2Continue6": "Trellis2 - Continue 6",
     "Trellis2CudaReset": "Trellis2 - Cuda Reset",
+    "Trellis2PreloadModels": "Trellis2 - Preload All Models",
+    "Trellis2StartTexturePreload": "Trellis2 - Start Texture Preload",
     }
+
+
+# --- Pre-warm heavy libraries at import time (runs during ComfyUI boot) ---
+def _prewarm_libraries():
+    """Force lazy initialization of heavy libraries in a background thread.
+
+    numba, pymeshlab, and flex_gemm have expensive first-use initialization
+    (JIT compilation, Qt plugin scanning, CUDA backend init). By triggering
+    this during ComfyUI boot, we avoid a ~32s delay on the first job.
+    """
+    import threading
+
+    def _warmup():
+        try:
+            import numba
+            _ = numba.config.THREADING_LAYER
+        except Exception:
+            pass
+        try:
+            ms = pymeshlab.MeshSet()
+            del ms
+        except Exception:
+            pass
+        try:
+            import flex_gemm
+        except Exception:
+            pass
+
+    threading.Thread(target=_warmup, daemon=True).start()
+
+_prewarm_libraries()
