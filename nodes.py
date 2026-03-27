@@ -4331,29 +4331,54 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 # --- Pre-warm heavy libraries at import time (runs during ComfyUI boot) ---
 def _prewarm_libraries():
-    """Force lazy initialization of heavy libraries in a background thread.
+    """Force full initialization of heavy libraries in a background thread.
 
-    numba, pymeshlab, and flex_gemm have expensive first-use initialization
-    (JIT compilation, Qt plugin scanning, CUDA backend init). By triggering
-    this during ComfyUI boot, we avoid a ~32s delay on the first job.
+    numba, pymeshlab, triton, and flex_gemm have expensive first-use init
+    (~32s total: JIT compilation, Qt plugin scanning, CUDA backend init,
+    triton kernel compilation). By triggering actual work during ComfyUI boot,
+    we avoid this delay on the first job.
     """
     import threading
 
     def _warmup():
+        import time
+        t0 = time.time()
+
+        # numba: accessing config is not enough — must JIT-compile a function
         try:
             import numba
-            _ = numba.config.THREADING_LAYER
+            @numba.jit(nopython=True)
+            def _dummy(x):
+                return x + 1
+            _dummy(0)
         except Exception:
             pass
+
+        # pymeshlab: force Qt plugin scan by creating a MeshSet
         try:
             ms = pymeshlab.MeshSet()
             del ms
         except Exception:
             pass
+
+        # triton: force kernel compilation infrastructure init
+        try:
+            import triton
+            import triton.language as tl
+            @triton.jit
+            def _dummy_kernel(x_ptr, n: tl.constexpr):
+                pass
+        except Exception:
+            pass
+
+        # flex_gemm: force CUDA sparse backend init
         try:
             import flex_gemm
         except Exception:
             pass
+
+        elapsed = time.time() - t0
+        print(f'[PREWARM] Libraries initialized in {elapsed:.1f}s')
 
     threading.Thread(target=_warmup, daemon=True).start()
 
