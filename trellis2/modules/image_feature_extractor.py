@@ -78,12 +78,32 @@ class DinoV3FeatureExtractor:
     def cpu(self):
         self.model.cpu()
 
+    def _get_layers(self):
+        """Find transformer layers in the DINOv3 model, regardless of transformers version."""
+        # Different versions of transformers use different attribute paths
+        for attr_path in [
+            lambda m: m.encoder.layer,    # transformers < 4.50
+            lambda m: m.encoder.layers,   # some versions
+            lambda m: m.layer,            # older custom builds
+            lambda m: m.layers,           # transformers >= 4.50
+        ]:
+            try:
+                layers = attr_path(self.model)
+                if layers is not None and len(layers) > 0:
+                    return layers
+            except AttributeError:
+                continue
+        raise AttributeError(
+            f"Cannot find transformer layers in DINOv3ViTModel. "
+            f"Available attributes: {[a for a in dir(self.model) if not a.startswith('_')]}"
+        )
+
     def extract_features(self, image: torch.Tensor) -> torch.Tensor:
         image = image.to(self.model.embeddings.patch_embeddings.weight.dtype)
         hidden_states = self.model.embeddings(image, bool_masked_pos=None)
         position_embeddings = self.model.rope_embeddings(image)
 
-        for i, layer_module in enumerate(self.model.encoder.layer):
+        for i, layer_module in enumerate(self._get_layers()):
             hidden_states = layer_module(
                 hidden_states,
                 position_embeddings=position_embeddings,
