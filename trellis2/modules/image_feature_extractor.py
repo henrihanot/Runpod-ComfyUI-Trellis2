@@ -80,12 +80,16 @@ class DinoV3FeatureExtractor:
 
     def _get_layers(self):
         """Find transformer layers in the DINOv3 model, regardless of transformers version."""
-        # Different versions of transformers use different attribute paths
+        # DINOv3ViTModel stores layers at different paths depending on the
+        # transformers version. In v4.56+, the encoder is at model.model
+        # (a DINOv3ViTEncoder) and layers at model.model.layer.
         for attr_path in [
-            lambda m: m.encoder.layer,    # transformers < 4.50
-            lambda m: m.encoder.layers,   # some versions
-            lambda m: m.layer,            # older custom builds
-            lambda m: m.layers,           # transformers >= 4.50
+            lambda m: m.model.layer,      # transformers >= 4.56 (DINOv3ViTEncoder)
+            lambda m: m.encoder.layer,    # standard ViT pattern
+            lambda m: m.layer,            # flat structure
+            lambda m: m.model.layers,     # alternative naming
+            lambda m: m.encoder.layers,   # alternative naming
+            lambda m: m.layers,           # alternative naming
         ]:
             try:
                 layers = attr_path(self.model)
@@ -95,7 +99,7 @@ class DinoV3FeatureExtractor:
                 continue
         raise AttributeError(
             f"Cannot find transformer layers in DINOv3ViTModel. "
-            f"Available attributes: {[a for a in dir(self.model) if not a.startswith('_')]}"
+            f"Available top-level attributes: {[a for a in dir(self.model) if not a.startswith('_')]}"
         )
 
     def extract_features(self, image: torch.Tensor) -> torch.Tensor:
