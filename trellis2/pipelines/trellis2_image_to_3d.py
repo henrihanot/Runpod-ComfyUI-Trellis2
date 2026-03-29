@@ -401,6 +401,61 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         elapsed = time.time() - t0
         print(f'[PRELOAD] Shape models loaded in {elapsed:.1f}s')
 
+    @torch.no_grad()
+    def warmup_inference(self, resolution=1024):
+        """Run a full dummy inference to compile all CUDA/triton kernels.
+
+        Loading models to GPU is not enough — the first forward pass of each model
+        triggers triton/flex_gemm kernel compilation (~40s for shape flow alone).
+        This method runs the full pipeline with a tiny dummy image to pre-compile
+        all kernels, so the first real job runs at full speed.
+        """
+        import time
+
+        t0 = time.time()
+        print('[WARMUP] Starting dummy inference to compile CUDA kernels...')
+
+        # 1. Load all shape models (parallel, to CPU then GPU)
+        self.preload_shape_models_parallel(resolution=resolution)
+
+        # 2. Image conditioning — triggers DINOv3 kernel compilation
+        # Use the model's native image_size (typically 2048) so kernels are compiled
+        # for the same tensor shapes as real inference
+        img_size = getattr(self.image_cond_model, 'image_size', 512)
+        print(f'[WARMUP] Compiling image conditioning kernels (image_size={img_size})...')
+        dummy_image = Image.new('RGB', (img_size, img_size), color=(128, 128, 128))
+        self.load_image_cond_model()
+        cond = self.get_cond([dummy_image], resolution, max_views=1)
+
+        # 3. Sparse structure — triggers sparse flow + decoder kernels
+        print('[WARMUP] Compiling sparse structure kernels...')
+        self.load_sparse_structure_model()
+        coords = self.sample_sparse_structure(cond, 32, 1, self.sparse_structure_sampler_params)
+
+        # 4. Shape flow — triggers the biggest kernel compilation (~40s)
+        print('[WARMUP] Compiling shape flow kernels...')
+        if resolution >= 1024:
+            self.load_shape_slat_flow_model_1024()
+            flow_model = self.models['shape_slat_flow_model_1024']
+        else:
+            self.load_shape_slat_flow_model_512()
+            flow_model = self.models['shape_slat_flow_model_512']
+
+        shape_slat = self.sample_shape_slat(cond, flow_model, coords, self.shape_slat_sampler_params)
+
+        # 5. Shape decoder — triggers decode kernels
+        print('[WARMUP] Compiling shape decoder kernels...')
+        self.load_shape_slat_decoder()
+        self.decode_shape_slat(shape_slat, resolution, use_tiled=True)
+
+        # Cleanup dummy results but keep models loaded
+        del coords, shape_slat, cond, dummy_image
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        elapsed = time.time() - t0
+        print(f'[WARMUP] Dummy inference complete — all kernels compiled in {elapsed:.1f}s')
+
     def _start_texture_preload(self, resolution=1024):
         """Start background threads to preload texture models to CPU RAM.
 
