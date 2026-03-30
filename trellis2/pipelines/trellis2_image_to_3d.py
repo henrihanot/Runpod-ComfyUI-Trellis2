@@ -432,6 +432,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self.load_sparse_structure_model()
         coords = self.sample_sparse_structure(cond, 32, 1, self.sparse_structure_sampler_params)
 
+        # If dummy image produced empty sparse structure (no voxels),
+        # create synthetic coords so shape flow kernels can still compile
+        if coords.shape[0] == 0:
+            print('[WARMUP] Empty sparse structure from dummy image, using synthetic coords...')
+            # Create a small set of fake coords: (batch_idx, x, y, z)
+            synthetic = []
+            for x in range(0, 4):
+                for y in range(0, 4):
+                    for z in range(0, 4):
+                        synthetic.append([0, x, y, z])
+            coords = torch.tensor(synthetic, dtype=torch.int32)
+
         # 4. Shape flow — triggers the biggest kernel compilation (~40s)
         print('[WARMUP] Compiling shape flow kernels...')
         if resolution >= 1024:
@@ -446,7 +458,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         # 5. Shape decoder — triggers decode kernels
         print('[WARMUP] Compiling shape decoder kernels...')
         self.load_shape_slat_decoder()
-        self.decode_shape_slat(shape_slat, resolution, use_tiled=True)
+        try:
+            self.decode_shape_slat(shape_slat, resolution, use_tiled=True)
+        except Exception as e:
+            # Decode may fail on synthetic data but kernels are still compiled
+            print(f'[WARMUP] Decode produced an error (expected with synthetic data): {e}')
 
         # Cleanup dummy results but keep models loaded
         del coords, shape_slat, cond, dummy_image
